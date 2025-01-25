@@ -19,3 +19,4 @@ class Payment(BaseModel):
     discount_percent: float | None = None
     tax_percent: float | None = None
     due_amount: float
+    evidence_file_id: str | None = None

@@ -6,6 +6,9 @@ import os
 from werkzeug.utils import secure_filename
 from app.db import get_collection, get_fs
 from app.models import Payment
+from flask import Response, jsonify
+from bson import ObjectId
+import gridfs
 
 
 collection = get_collection()
@@ -36,29 +39,52 @@ def get_payments():
         search_query = request.args.get('search', '')
         filter_status = request.args.get('status', None)
 
+        # Ensure valid status values
+        valid_statuses = ['pending', 'due_now', 'completed']
+        if filter_status and filter_status not in valid_statuses:
+            return jsonify({'error': 'Invalid status value. Allowed values: pending, due_now, completed'}), 400
+
         query = {}
 
+        # Search filter for payee's first name
         if search_query:
             query['payee_first_name'] = {'$regex': search_query, '$options': 'i'}
 
+        # Status filter
         if filter_status:
             query['payee_payment_status'] = filter_status
 
         skip = (page - 1) * limit
 
-        payments_cursor = collection.find(query).skip(skip).limit(limit)
+        # Adding sorting based on the due date (optional, but helpful)
+        payments_cursor = collection.find(query).skip(skip).limit(limit).sort('payee_due_date', 1)
         payments = []
 
         for doc in payments_cursor:
-            payments.append({
-                '_id': str(doc['_id']),
-                'payee_first_name': doc['payee_first_name'],
-                'payee_last_name': doc['payee_last_name'],
-                'payee_payment_status': doc['payee_payment_status'],
-                'payee_due_date': doc['payee_due_date'],
-                'total_due': doc.get('total_due', 0)
-            })
+            try:
+                due_amount = float(doc.get('due_amount', 0))  # Default to 0 if not found
+                discount_percent = float(doc.get('discount_percent', 0))  # Default to 0 if not found
+                tax_percent = float(doc.get('tax_percent', 0))  # Default to 0 if not found
 
+                # Calculate discount and tax amounts
+                discount_amount = (discount_percent / 100) * due_amount
+                tax_amount = (tax_percent / 100) * due_amount
+
+                # Calculate total_due
+                total_due = due_amount - discount_amount + tax_amount
+                payments.append({
+                    '_id': str(doc['_id']),
+                    'payee_first_name': doc['payee_first_name'],
+                    'payee_last_name': doc['payee_last_name'],
+                    'payee_payment_status': doc['payee_payment_status'],
+                    'payee_due_date': doc['payee_due_date'],
+                    'total_due': round(total_due, 2),
+                    'evidence_file_id': doc.get('evidence_file_id', ''),
+                })
+            except ValueError as e:
+                return jsonify({'error': f'Invalid numeric value in payment record: {str(e)}'}), 400
+
+        # Total number of payments matching the query
         total_payments = collection.count_documents(query)
 
         return jsonify({
@@ -73,13 +99,66 @@ def get_payments():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/payments/<payment_id>', methods=['GET'])
+def get_payment_by_id(payment_id):
+    try:
+        # Convert the payment_id to an ObjectId
+        payment = collection.find_one({'_id': ObjectId(payment_id)})
+
+        # If payment is not found, return a 404 error
+        if not payment:
+            return jsonify({'error': 'Payment not found'}), 404
+
+        try:
+            # Convert values to float to ensure proper arithmetic operations
+            due_amount = float(payment['due_amount'])
+            discount_percent = float(payment.get('discount_percent', 0))  # Default to 0 if not found
+            tax_percent = float(payment.get('tax_percent', 0))  # Default to 0 if not found
+
+            # Calculate discount and tax amounts
+            discount_amount = (discount_percent / 100) * due_amount
+            tax_amount = (tax_percent / 100) * due_amount
+
+            # Calculate total_due
+            total_due = due_amount - discount_amount + tax_amount
+        except ValueError as e:
+            return jsonify({'error': f'Invalid numeric value: {str(e)}'}), 400
+
+        # Return the payment details with all its attributes
+        payment_data = {
+            '_id': str(payment['_id']),
+            'payee_first_name': payment['payee_first_name'],
+            'payee_last_name': payment['payee_last_name'],
+            'payee_payment_status': payment['payee_payment_status'],
+            'payee_added_date_utc': payment.get('payee_added_date_utc'),
+            'payee_due_date': payment['payee_due_date'],
+            'payee_address_line_1': payment['payee_address_line_1'],
+            'payee_address_line_2': payment.get('payee_address_line_2'),
+            'payee_city': payment['payee_city'],
+            'payee_country': payment['payee_country'],
+            'payee_province_or_state': payment.get('payee_province_or_state'),
+            'payee_postal_code': payment['payee_postal_code'],
+            'payee_phone_number': payment['payee_phone_number'],
+            'payee_email': payment['payee_email'],
+            'currency': payment['currency'],
+            'discount_percent': payment.get('discount_percent'),
+            'tax_percent': payment.get('tax_percent'),
+            'due_amount': payment['due_amount'],
+            'total_due': total_due,
+            'evidence_file_id': payment.get('evidence_file_id',''),
+        }
+
+        return jsonify({'payment': payment_data}), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 # Route to create a new payment
 @app.route('/payments', methods=['POST'])
 def create_payment():
     try:
         data = request.get_json()
-
+        print(data)
         # Validate data using Pydantic model
         try:
             payment = Payment(**data)  # Validate with Pydantic model
@@ -96,54 +175,63 @@ def create_payment():
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/payments/<payment_id>', methods=['PUT'])
+@app.route('/payments/<payment_id>', methods=['PATCH'])
 def update_payment(payment_id):
-    data = request.get_json()
+    try:
+        collection = get_collection()  # Get the correct collection
+        fs = get_fs()  # Ensure fs is an instance of GridFS
 
-    collection = get_collection()  # Get collection within the function
-    fs = get_fs()  # Get fs instance within the function
+        # Extract form data instead of JSON
+        payee_due_date = request.form.get('payee_due_date')
+        due_amount = request.form.get('due_amount')
+        payee_payment_status = request.form.get('payee_payment_status')
 
-    # Check if the payment status is "completed" and if a file is uploaded
-    if data.get('payee_payment_status') == 'completed':
-        # Check if file is present in the request
-        if 'evidence_file' not in request.files:
-            return jsonify({'error': 'Evidence file is required when marking payment as completed'}), 400
+        # Validate the presence of editable fields
+        update_data = {}
 
-        file = request.files['evidence_file']
+        if payee_due_date:
+            update_data['payee_due_date'] = payee_due_date
 
-        # Validate file type
-        if file and allowed_file(file.filename):
-            # Store the file in MongoDB using GridFS
-            filename = secure_filename(file.filename)
-            file_data = file.read()
-            file_id = fs.put(file_data, filename=filename)
+        if due_amount:
+            update_data['due_amount'] = float(due_amount)  # Ensure correct data type
 
-            # Update the payment status and save the file ID in the payment record
-            result = collection.update_one(
-                {'_id': ObjectId(payment_id)},
-                {'$set': {
-                    'payee_payment_status': 'completed',
-                    'evidence_file_id': file_id
-                }}
-            )
+        if payee_payment_status:
+            update_data['payee_payment_status'] = payee_payment_status
 
-            if result.modified_count == 1:
-                return jsonify({'message': 'Payment status updated to completed and evidence file uploaded successfully'}), 200
+        # Handle file upload if status is "completed"
+        if payee_payment_status == 'completed':
+            if 'evidence_file' not in request.files:
+                return jsonify({'error': 'Evidence file is required when marking payment as completed'}), 400
+
+            file = request.files['evidence_file']
+
+            if file and allowed_file(file.filename):
+                filename = secure_filename(file.filename)
+                file_data = file.read()
+
+                # Correctly use GridFS to store the file
+                file_id = fs.put(file_data, filename=filename)
+
+                update_data['evidence_file_id'] = str(file_id)
             else:
-                return jsonify({'error': 'Payment not found'}), 404
+                return jsonify({'error': 'Invalid file type. Only PDF, PNG, JPG allowed'}), 400
+
+        if not update_data:
+            return jsonify({'error': 'No valid fields to update'}), 400
+
+        # Perform the update with the provided data
+        result = collection.update_one(
+            {'_id': ObjectId(payment_id)},
+            {'$set': update_data}
+        )
+
+        if result.modified_count == 1:
+            return jsonify({'message': 'Payment updated successfully', 'id': str(payment_id)}), 200
         else:
-            return jsonify({'error': 'Invalid file type. Only PDF, PNG, JPG allowed'}), 400
+            return jsonify({'error': 'Payment not found'}), 404
 
-    # Handle other status updates (without evidence file)
-    result = collection.update_one(
-        {'_id': ObjectId(payment_id)},
-        {'$set': {'payee_payment_status': data['payee_payment_status']}}
-    )
-
-    if result.modified_count == 1:
-        return jsonify({'message': 'Payment status updated successfully'}), 200
-    else:
-        return jsonify({'error': 'Payment not found'}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/payments/<payment_id>', methods=['DELETE'])
 def delete_payment(payment_id):
@@ -209,16 +297,29 @@ def upload_evidence(payment_id):
 
 
 # Route to download evidence file
+
+from flask import send_file, jsonify
+from bson import ObjectId
+import gridfs
+import io
+
 @app.route('/payments/<payment_id>/download_evidence', methods=['GET'])
 def download_file(payment_id):
-    # Retrieve the payment document from MongoDB
     payment = collection.find_one({'_id': ObjectId(payment_id)})
-
+    
     if payment and 'evidence_file_id' in payment:
         file_id = payment['evidence_file_id']
-        file = fs.get(file_id)
+        file = fs.get(ObjectId(file_id))
 
-        return file, 200  # This will send the file content back as a download
+        # Convert the file to a readable stream
+        file_data = io.BytesIO(file.read())
+        
+        # Use send_file to return the file properly
+        return send_file(
+            file_data,
+            as_attachment=True,
+            download_name=file.filename,  # Flask 2.x uses download_name instead of attachment_filename
+            mimetype=file.content_type
+        )
 
     return jsonify({'error': 'Evidence file not found'}), 404
-

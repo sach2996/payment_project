@@ -40,7 +40,7 @@ def normalize_csv_and_store(file_path):
             df['payee_added_date_utc'] = pd.to_datetime(today)
 
         # Add calculated fields 'total_due'
-        df['total_due'] = df['due_amount'] - df['discount_percent'].fillna(0) + df['tax_percent'].fillna(0)
+        # df['total_due'] = df['due_amount'] - df['discount_percent'].fillna(0) + df['tax_percent'].fillna(0)
 
         # Convert the DataFrame to a dictionary for MongoDB insertion
         data_to_insert = df.to_dict(orient='records')
