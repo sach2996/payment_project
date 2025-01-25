@@ -1,6 +1,6 @@
 from flask import Flask
 from flask_pymongo import PyMongo
-from flask_cors import CORS
+from flask_cors import CORS, cross_origin
 import gridfs
 from dotenv import load_dotenv
 import os
