@@ -9,6 +9,7 @@ from app.models import Payment
 from flask import Response, jsonify
 from bson import ObjectId
 import gridfs
+from datetime import date, datetime
 
 
 collection = get_collection()
@@ -40,9 +41,9 @@ def get_payments():
         filter_status = request.args.get('status', None)
 
         # Ensure valid status values
-        valid_statuses = ['pending', 'due_now', 'completed']
+        valid_statuses = ['pending', 'due_now', 'completed', 'overdue']
         if filter_status and filter_status not in valid_statuses:
-            return jsonify({'error': 'Invalid status value. Allowed values: pending, due_now, completed'}), 400
+            return jsonify({'error': 'Invalid status value. Allowed values: pending, due_now, completed, overdue'}), 400
 
         query = {}
 
@@ -72,6 +73,17 @@ def get_payments():
 
                 # Calculate total_due
                 total_due = due_amount - discount_amount + tax_amount
+
+                # Check if payee_due_date is today or in the past
+                try:
+                    due_date = datetime.strptime(doc['payee_due_date'], '%Y-%m-%d')  # Assuming date format is YYYY-MM-DD
+                    if due_date.date() < date.today():
+                        doc['payee_payment_status'] = 'overdue'
+                    elif due_date.date() == date.today():
+                        doc['payee_payment_status'] = 'due_now'
+                except (ValueError, KeyError):
+                    pass 
+
                 payments.append({
                     '_id': str(doc['_id']),
                     'payee_first_name': doc['payee_first_name'],
@@ -98,7 +110,6 @@ def get_payments():
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
 @app.route('/payments/<payment_id>', methods=['GET'])
 def get_payment_by_id(payment_id):
     try:
