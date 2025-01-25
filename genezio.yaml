@@ -9,6 +9,6 @@ backend:
         name: python
         packageManager: pip
     path: ./
-name: flask-getting-started
+name: payment-project
 region: us-east-1
 yamlVersion: 2
