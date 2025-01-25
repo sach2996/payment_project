@@ -1,0 +1,14 @@
+backend:
+    functions:
+        - entry: app.py
+          handler: app
+          name: flask-function
+          path: ./
+          type: httpServer
+    language:
+        name: python
+        packageManager: pip
+    path: ./
+name: flask-getting-started
+region: us-east-1
+yamlVersion: 2
