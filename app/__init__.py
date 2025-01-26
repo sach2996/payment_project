@@ -18,7 +18,7 @@ mongo = PyMongo(app)
 fs = gridfs.GridFS(mongo.db)
 
 # Enable CORS
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # Import routes after initializing the app
 from app import routes
